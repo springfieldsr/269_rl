@@ -38,6 +38,26 @@ def degprocess(deg):
     #return deg/20.
     return torch.clamp_max(deg / 20., 1.)
 
+def feature_similarity(p, mode):
+    train_indices = (p.trainmask == 1).nonzero(as_tuple=True)[1].view(p.batchsize, -1)
+    if train_indices.nelement() == 0:
+        return torch.zeros((p.batchsize, p.G.X.shape[0])).cuda()
+
+    similarity = []
+    for idx, row in enumerate(train_indices):
+        if mode == "raw_feature":
+            matrix = p.G.X
+        elif mode == "embedding":
+            matrix = p.allnodes_output.transpose(1, 2)[idx]
+        else:
+            raise NotImplementedError
+        train_features = matrix[row, :]
+        sim = torch.matmul(matrix, train_features.T)
+        sim_score = torch.min(sim, dim=1)[0]
+        similarity.append(sim_score)
+
+    return torch.vstack(similarity).cuda()
+
 def localdiversity(probs,adj,deg):
     indices = adj.coalesce().indices()
     N =adj.size()[0]
@@ -87,7 +107,7 @@ class Env(object):
     def getState(self,playerid=0):
         p = self.players[playerid]
         output = logprob2Prob(p.allnodes_output.transpose(1,2),multilabel=p.G.stat["multilabel"])
-        state = self.makeState(output, p.trainmask, p.G.deg, p.G.centrality, playerid)
+        state = self.makeState(output, p)
         return state
 
 
@@ -95,11 +115,12 @@ class Env(object):
         self.players[playerid].reset(fix_test=False)
 
     
-    def makeState(self, probs, selected, deg, cent, playerid, adj=None, multilabel=False ):
+    def makeState(self, probs, p, multilabel=False):
         entro = entropy(probs, multilabel=multilabel)
-        entro = normalizeEntropy(entro,probs.size(-1)) ## in order to transfer
-        deg = degprocess(deg.expand([probs.size(0)]+list(deg.size())))
-        cent = cent.expand([probs.size(0)]+list(cent.size()))
+        entro = normalizeEntropy(entro, probs.size(-1)) ## in order to transfer
+        deg = degprocess(p.G.deg.expand([probs.size(0)]+list(p.G.deg.size())))
+        cent = p.G.centrality
+        cent = cent.expand([probs.size(0)]+list(p.G.centrality.size()))
 
         features = []
         if self.args.use_entropy:
@@ -107,12 +128,18 @@ class Env(object):
         if self.args.use_degree:
             features.append(deg)
         if self.args.use_local_diversity:
-            mean_kl_ht,mean_kl_th = localdiversity(probs,self.players[playerid].G.adj,self.players[playerid].G.deg)
+            mean_kl_ht,mean_kl_th = localdiversity(probs, p.G.adj, p.G.deg)
             features.extend([mean_kl_ht, mean_kl_th])
         if self.args.use_select:
-            features.append(selected)
+            features.append(p.trainmask)
         if self.args.use_centrality:
             features.append(cent)
-        state = torch.stack(features, dim=-1)
+        if self.args.use_feature_similarity:
+            sim = feature_similarity(p, mode="raw_feature")
+            features.append(sim)
+        if self.args.use_embedding_similarity:
+            sim = feature_similarity(p, mode="embedding")
+            features.append(sim)
 
+        state = torch.stack(features, dim=-1)
         return state

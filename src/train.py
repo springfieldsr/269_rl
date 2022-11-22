@@ -51,6 +51,8 @@ def parse_args():
     parser.add_argument("--use_local_diversity",type=int,default=1)
     parser.add_argument("--use_select",type=int,default=1)
     parser.add_argument("--use_centrality", type=int, default=1)
+    parser.add_argument("--use_feature_similarity", type=int, default=1)
+    parser.add_argument("--use_embedding_similarity", type=int, default=1)
 
     parser.add_argument('--pg', type=str, default='reinforce')
     parser.add_argument('--ppo_epoch', type=int, default=5)
