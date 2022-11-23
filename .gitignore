@@ -3,3 +3,4 @@ models/
 log.txt
 src/__pycache__/
 src/utils/__pycache__/
+tmp.py

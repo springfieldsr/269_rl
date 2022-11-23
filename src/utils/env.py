@@ -27,11 +27,13 @@ def prob2Logprob(probs,multilabel=False):
         logprobs = torch.log(probs)
     return logprobs
 
-def perc(input):
-    # the biger valueis the biger result is
-    numnode = input.size(-2)
-    res = torch.argsort(torch.argsort(input, dim=-2), dim=-2) / float(numnode)
-    return res
+
+# calculate the percentage of elements smaller than the k-th element
+def perc(input, k): return sum([1 if i else 0 for i in input < input[k]]) / float(len(input))
+
+
+# calculate the percentage of elements larger than the k-th element
+def percd(input, k): return sum([1 if i else 0 for i in input > input[k]]) / float(len(input))
 
 def degprocess(deg):
     # deg = torch.log(1+deg)
@@ -53,10 +55,11 @@ def feature_similarity(p, mode):
             raise NotImplementedError
         train_features = matrix[row, :]
         sim = torch.matmul(matrix, train_features.T)
-        sim_score = torch.min(sim, dim=1)[0]
+        sim = torch.max(sim, dim=1)[0].cpu().numpy()
+        sim_score = [percd(sim, i) for i in range(sim.shape[0])]
         similarity.append(sim_score)
 
-    return torch.vstack(similarity).cuda()
+    return torch.tensor(similarity).cuda()
 
 def localdiversity(probs,adj,deg):
     indices = adj.coalesce().indices()
