@@ -47,7 +47,29 @@ class GraphConvolution(nn.Module):
                + str(self.in_features) + ' -> ' \
                + str(self.out_features) + ')'
 
-
+class SAC(nn.Module):
+    def __init__(self,args,statedim):
+        super(SAC,self).__init__()
+        #local network
+        self.critic_local1=PolicyNet2(args,statedim)
+        self.critic_local2=PolicyNet2(args,statedim)
+        self.critic_optimizer1=torch.optim.Adam(self.critic_local1.parameters(),LEARNING_RATE,EPS)
+        self.critic_optimizer2=torch.optim.Adam(self.critic_local2.parameters(),LEARNING_RATE,EPS)
+        #target network
+        self.critic_target1=PolicyNet2(args,statedim)
+        self.critic_target2=PolicyNet2(args,statedim)
+        #equalize local and target network's weights
+        self.equalize_weights(self.critic_local1,self.critic_target1)
+        self.equalize_weights(self.critic_local2,self.critic_target2)
+        self.replay_buffer()=ReplayBuffer()
+        self.actor_local=PolicyNet2(args,statedim)
+        self.actor_optimizer=torch.optim.Adam(self.actor_local.parameters(),LEARNING_RATE,EPS)
+        #fix entropy for simplicity
+        self.alpha=ALPHA
+        
+    def equalize_weights(local_network,target_network):
+        for local_param, target_param in zip(local_network.parameters(),target_network.parameters()):
+            target_param.data.copy_(local_param.data.clone())
 # vanilla GCN
 class PolicyNet(nn.Module):
 
