@@ -88,7 +88,7 @@ class SingleTrain(object):
             self.rshapers.append(RewardShaper(args))
             self.accmeters.append(AverageMeter("accmeter",ave_step=100))
         self.env = Env(self.players,args)
-
+        self.tau=0.005
         self.policy=switcher[args.policynet](self.args,self.env.statedim).cuda()
 
         self.opt = torch.optim.Adam(self.policy.parameters(), lr=self.args.rllr)
@@ -131,14 +131,12 @@ class SingleTrain(object):
             self.states.append(state)
             pool = self.env.players[playerid].getPool(reduce=False)
             self.pools.append(pool)
-
             logits = self.policy(state,self.graphs[playerid].normadj)
             action,logp_action, p_action = self.selectActions(logits,pool)
             self.action_index[:, epoch] = action.detach().cpu().numpy()
             logp_actions.append(logp_action)
             p_actions.append(p_action)
             rewards.append(self.env.step(action,playerid))
-
             self.entropy_reg.append(-(self.valid_probs * torch.log(1e-6 + self.valid_probs)).sum(dim=1) / np.log(self.valid_probs.size(1)))
             ##
             # if episode % self.args.logfreq == 0:
@@ -191,13 +189,77 @@ class SingleTrain(object):
                 loss.backward()
                 self.opt.step()
         elif (self.args.pg=='sac'):
+            #play one episode ensure that we are within budget:
+            # last state is terminal state?
+            self.critic_local1=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.critic_local2=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.critic_optimizer1=torch.optim.Adam(self.critic_local1.parameters(),self.args.rllr)
+            self.critic_optimizer2=torch.optim.Adam(self.critic_local2.parameters(),self.args.rllr)
+            #target network
+            self.critic_target1=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.critic_target2=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            #equalize local and target network's weights
+            self.update_weights(self.critic_local1,self.critic_target1)
+            self.update_weights(self.critic_local2,self.critic_target2)
+            self.actor_local=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.actor_optimizer=torch.optim.Adam(self.actor_local.parameters(),self.args.rllr)
+            curr_next_states=[]
             for i in range(self.args.ppo_epoch):
-                
-            with torch.no_grad():
+                curr_next_states=[(self.states[i],self.states[i+1]) for i in range(len(self.states)-1)]
+                curr_states, next_states=list(zip(*curr_next_states))
+                critic_loss1,critic_loss2=self.compute_critic_losses(curr_states,next_states,self.actions[i],rewards)
+                critic_loss1.backward()
+                critic_loss2.backward()
+                self.policy.critic_optimizer1.step()
+                self.policy.critic_optimizer2.step()
 
+                actor_loss,log_probabilities=self.compute_actor_loss(curr_states)
+                actor_loss.backward()
+                self.policy.actor_optimizer.step()
+                self.policy.update_weights(self.policy.critic_local1,self.critic_target1)
+                self.policy.update_weights(self.policy.critic_local2,self.critic_target2)
+            return actor_loss.item(),critic_loss1.item(),critic_loss2.item()
         return loss.item()
 
-
+    def compute_critic_losses(self,states,next_states,actions,rewards):
+        next_Qs=[]
+        Q1s=[]
+        Q2s=[]
+        for i in range(len(states)):
+            with torch.no_grad():
+                state=states[i]
+                logits = self.policy(state,self.graphs[self.playerid].normadj)
+                next_state_action,logp_action, p_action = self.selectActions(logits,self.pools[i])
+                Q1_target=self.critic_target1(next_states[i],self.graphs[self.playerid].normadj)
+                Q2_target=self.critic_target2(next_states[i],self.graphs[self.playerid].normadj)
+                print(actions[0])
+                Q1=self.critic_local1(next_states[i],self.graphs[self.playerid].normadj).gather(actions[i].long())
+                Q2=self.critic_local2(next_states[i],self.graphs[self.playerid].normadj).gather(actions[i].long())
+                Q1s.append(Q1)
+                Q2s.append(Q2)
+                min_Q=p_action*(torch.min(Q1_target,Q2_target)-self.alpha*logp_action)
+                min_Q=min_Q.sum(dim=1).unsqueeze(-1)
+                mark=1 if i<len(states)-1 else 0
+                next_Q=rewards[i]+mark*self.policy.discount*min_Q
+                next_Qs.append(next_Q)
+        Q1_loss=F.mse_loss(Q1s,next_Qs)
+        Q2_loss=F.mse_loss(Q2s,next_Qs)
+        return Q1_loss,Q2_loss
+    def compute_actor_loss(self,states):
+        policy_loss=0
+        log_probabilities=0
+        for i in range(len(states)):
+            with torch.no_grad():
+                state=states[i]
+                logits = self.policy(state,self.graphs[self.playerid].normadj)
+                next_state_action,logp_action, p_action = self.selectActions(logits,self.pools[i])
+                Q1=self.critic_local1(state,self.graphs[self.playerid].normadj)
+                Q2=self.critic_target2(state,self.graphs[self.playerid].normadj) 
+                minQ=torch.min(Q1,Q2)
+                policy_loss+=self.alpha*logp_action-minQ
+                log_probabilities+=logp_action*p_action
+        return policy_loss/len(states),log_probabilities
+    
     def trackActionProb(self, state, pool, action):
         logits = self.policy(state, self.graphs[self.playerid].normadj)
         valid_logits = logits[pool].reshape(self.args.batchsize,-1)
@@ -226,7 +288,9 @@ class SingleTrain(object):
     
         return action, logprob, prob
 
-    
+    def update_weights(self,local_network,target_network):
+        for local_param, target_param in zip(local_network.parameters(),target_network.parameters()):
+            target_param.data.copy_(self.tau*local_param.data+(1-self.tau)*target_param.data)
 
 if __name__ == "__main__":
 
