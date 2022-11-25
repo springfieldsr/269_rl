@@ -24,6 +24,7 @@ class GraphLoader(object):
             self.prefix = os.path.join(root, name,multigraphindex,multigraphindex)
         else:
             self.prefix = os.path.join(root,name,name)
+        print(self.prefix)
         self._load()
         self._registerStat()
         self.printStat()

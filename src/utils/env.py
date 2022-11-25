@@ -3,6 +3,8 @@ import time
 import torch
 import torch.nn.functional as F
 import numpy as np
+import scipy
+import collections
 
 from src.utils.player import Player
 from src.utils.utils import *
@@ -32,8 +34,15 @@ def prob2Logprob(probs,multilabel=False):
 def perc(input, k): return sum([1 if i else 0 for i in input < input[k]]) / float(len(input))
 
 
-# calculate the percentage of elements larger than the k-th element
-def percd(input, k): return sum([1 if i else 0 for i in input > input[k]]) / float(len(input))
+def percd(input):
+    # rank = scipy.stats.rankdata(input, method="ordinal")
+    # total = len(input)
+    # return [(total - rank[i]) / total for i in range(total)]
+    total = len(input)
+    _, ranking = torch.sort(input)
+    ranking = (total - ranking - 1) / total
+    return ranking
+
 
 def degprocess(deg):
     # deg = torch.log(1+deg)
@@ -55,11 +64,11 @@ def feature_similarity(p, mode):
             raise NotImplementedError
         train_features = matrix[row, :]
         sim = torch.matmul(matrix, train_features.T)
-        sim = torch.max(sim, dim=1)[0].cpu().numpy()
-        sim_score = [percd(sim, i) for i in range(sim.shape[0])]
+        sim = torch.max(sim, dim=1)[0]
+        sim_score = percd(sim)
         similarity.append(sim_score)
 
-    return torch.tensor(similarity).cuda()
+    return torch.vstack(similarity)
 
 def localdiversity(probs,adj,deg):
     indices = adj.coalesce().indices()

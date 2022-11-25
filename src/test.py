@@ -42,6 +42,9 @@ def parse_args():
     parser.add_argument("--use_degree",type=int,default=1)
     parser.add_argument("--use_local_diversity",type=int,default=1)
     parser.add_argument("--use_select",type=int,default=1)
+    parser.add_argument("--use_centrality", type=int, default=0)
+    parser.add_argument("--use_feature_similarity", type=int, default=0)
+    parser.add_argument("--use_embedding_similarity", type=int, default=0)
     
     parser.add_argument("--age_basef", type=float, default=0.95)
 
