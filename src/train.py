@@ -69,7 +69,41 @@ def parse_args():
 
     return args
 
+class Actor(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(Actor, self).__init__()
 
+        self.l1 = nn.Linear(state_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, action_dim)
+
+    def forward(self, state):
+
+        q1 = F.relu(self.l1(state))
+        q1 = F.relu(self.l2(q1))
+        q1 = self.l3(q1)
+        return q1
+
+
+class Critic(nn.Module):
+    def __init__(self, state_dim, action_dim):
+        super(Critic, self).__init__()
+
+        # Q1 architecture
+        self.l1 = nn.Linear(state_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, 1)
+
+        # # Q2 architecture
+        # self.l4 = nn.Linear(state_dim + action_dim, 256)
+        # self.l5 = nn.Linear(256, 256)
+        # self.l6 = nn.Linear(256, 1)
+
+    def forward(self, state):
+        q1 = F.relu(self.l1(state))
+        q1 = F.relu(self.l2(q1))
+        q1 = self.l3(q1)
+        return q1
 class SingleTrain(object):
 
     def __init__(self, args):
@@ -191,74 +225,80 @@ class SingleTrain(object):
         elif (self.args.pg=='sac'):
             #play one episode ensure that we are within budget:
             # last state is terminal state?
-            self.critic_local1=switcher[args.policynet](self.args,self.env.statedim).cuda()
-            self.critic_local2=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.critic_local1=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
+            self.critic_local2=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
             self.critic_optimizer1=torch.optim.Adam(self.critic_local1.parameters(),self.args.rllr)
             self.critic_optimizer2=torch.optim.Adam(self.critic_local2.parameters(),self.args.rllr)
             #target network
-            self.critic_target1=switcher[args.policynet](self.args,self.env.statedim).cuda()
-            self.critic_target2=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.critic_target1=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
+            self.critic_target2=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
             #equalize local and target network's weights
             self.update_weights(self.critic_local1,self.critic_target1)
             self.update_weights(self.critic_local2,self.critic_target2)
-            self.actor_local=switcher[args.policynet](self.args,self.env.statedim).cuda()
+            self.actor_local=Actor(self.env.statedim,self.actions[0].size(-1)).cuda()
             self.actor_optimizer=torch.optim.Adam(self.actor_local.parameters(),self.args.rllr)
-            curr_next_states=[]
             for i in range(self.args.ppo_epoch):
-                curr_next_states=[(self.states[i],self.states[i+1]) for i in range(len(self.states)-1)]
-                curr_states, next_states=list(zip(*curr_next_states))
-                critic_loss1,critic_loss2=self.compute_critic_losses(curr_states,next_states,self.actions[i],rewards)
+                next_states=[self.states[j+1] for j in range(len(self.states)-1)]
+                next_states.append(self.states[len(self.states)-1])
+                critic_loss1,critic_loss2=self.compute_critic_losses(self.states,torch.stack(next_states,dim=1),self.actions,rewards)
                 critic_loss1.backward()
                 critic_loss2.backward()
-                self.policy.critic_optimizer1.step()
-                self.policy.critic_optimizer2.step()
+                self.critic_optimizer1.step()
+                self.critic_optimizer2.step()
 
-                actor_loss,log_probabilities=self.compute_actor_loss(curr_states)
+                actor_loss,log_probabilities=self.compute_actor_loss(self.states)
                 actor_loss.backward()
-                self.policy.actor_optimizer.step()
-                self.policy.update_weights(self.policy.critic_local1,self.critic_target1)
-                self.policy.update_weights(self.policy.critic_local2,self.critic_target2)
+                self.actor_optimizer.step()
+                self.update_weights(self.critic_local1,self.critic_target1)
+                self.update_weights(self.critic_local2,self.critic_target2)
             return actor_loss.item(),critic_loss1.item(),critic_loss2.item()
         return loss.item()
 
     def compute_critic_losses(self,states,next_states,actions,rewards):
-        next_Qs=[]
-        Q1s=[]
-        Q2s=[]
-        for i in range(len(states)):
-            with torch.no_grad():
-                state=states[i]
-                logits = self.policy(state,self.graphs[self.playerid].normadj)
-                next_state_action,logp_action, p_action = self.selectActions(logits,self.pools[i])
-                Q1_target=self.critic_target1(next_states[i],self.graphs[self.playerid].normadj)
-                Q2_target=self.critic_target2(next_states[i],self.graphs[self.playerid].normadj)
-                print(actions[0])
-                Q1=self.critic_local1(next_states[i],self.graphs[self.playerid].normadj).gather(actions[i].long())
-                Q2=self.critic_local2(next_states[i],self.graphs[self.playerid].normadj).gather(actions[i].long())
-                Q1s.append(Q1)
-                Q2s.append(Q2)
-                min_Q=p_action*(torch.min(Q1_target,Q2_target)-self.alpha*logp_action)
-                min_Q=min_Q.sum(dim=1).unsqueeze(-1)
-                mark=1 if i<len(states)-1 else 0
-                next_Q=rewards[i]+mark*self.policy.discount*min_Q
-                next_Qs.append(next_Q)
+        logits_list = [self.policy(state,self.graphs[self.playerid].normadj) for state in states]
+        next_actions=[]
+        p_probs=[]
+        log_probs=[]
+        for i in range(len(logits_list)):
+          a,b,c=self.selectActions(logits_list[i],self.pools[i])
+          next_actions.append(a)
+          log_probs.append(b)
+          p_probs.append(c)
+        
+        next_actions_tensor=torch.stack(next_actions,dim=1)
+        p_probs_tensor=torch.stack(p_probs,dim=1)
+        log_probs_tensor=torch.stack(log_probs,dim=1)
+        with torch.no_grad():
+            Q1_target=self.critic_target1.forward(next_states).squeeze(-1).mean(-1)
+            Q2_target=self.critic_target2.forward(next_states).squeeze(-1).mean(-1)
+            min_Q=p_probs_tensor*(torch.min(Q1_target,Q2_target)-log_probs_tensor)
+           
+            not_done = torch.ones_like(Q1_target).cuda()
+            not_done[self.args.batchsize-1,:]=torch.zeros(Q1_target[0].size()).cuda()
+            next_Qs=rewards.T+not_done*0.99*min_Q
+        states_tensor=torch.stack(states,1)
+        Q1s=self.critic_local1.forward(states_tensor).squeeze(-1).mean(-1)
+        Q2s=self.critic_local2.forward(states_tensor).squeeze(-1).mean(-1)
         Q1_loss=F.mse_loss(Q1s,next_Qs)
         Q2_loss=F.mse_loss(Q2s,next_Qs)
         return Q1_loss,Q2_loss
     def compute_actor_loss(self,states):
-        policy_loss=0
-        log_probabilities=0
-        for i in range(len(states)):
-            with torch.no_grad():
-                state=states[i]
-                logits = self.policy(state,self.graphs[self.playerid].normadj)
-                next_state_action,logp_action, p_action = self.selectActions(logits,self.pools[i])
-                Q1=self.critic_local1(state,self.graphs[self.playerid].normadj)
-                Q2=self.critic_target2(state,self.graphs[self.playerid].normadj) 
-                minQ=torch.min(Q1,Q2)
-                policy_loss+=self.alpha*logp_action-minQ
-                log_probabilities+=logp_action*p_action
-        return policy_loss/len(states),log_probabilities
+        logits_list = [self.policy(state,self.graphs[self.playerid].normadj) for state in states]
+        log_probs=[]
+        probs=[]
+        for i in range(len(logits_list)):
+          a,b,c=self.selectActions(logits_list[i],self.pools[i])
+          log_probs.append(b)
+          probs.append(c)
+        log_probs_tensor=torch.stack(log_probs,1)
+        probs_tensor=torch.stack(probs,1)
+        states_tensor=torch.stack(states,1)
+        Q1s=self.critic_local1(states_tensor).squeeze(-1).mean(-1)
+        Q2s=self.critic_local2(states_tensor).squeeze(-1).mean(-1)
+        minQ=torch.min(Q1s,Q2s)
+        policy_loss=torch.sum(log_probs_tensor-minQ,dim=1).mean()
+        probabilities=torch.sum(log_probs_tensor*probs_tensor,1)
+        return policy_loss,probabilities
     
     def trackActionProb(self, state, pool, action):
         logits = self.policy(state, self.graphs[self.playerid].normadj)
