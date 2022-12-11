@@ -166,6 +166,7 @@ class SingleTrain(object):
             pool = self.env.players[playerid].getPool(reduce=False)
             self.pools.append(pool)
             logits = self.policy(state,self.graphs[playerid].normadj)
+            #action indicates the next node we are going to annotate
             action,logp_action, p_action = self.selectActions(logits,pool)
             self.action_index[:, epoch] = action.detach().cpu().numpy()
             logp_actions.append(logp_action)
@@ -197,7 +198,6 @@ class SingleTrain(object):
     def finishEpisode(self,rewards,logp_actions, p_actions):
 
         rewards = torch.from_numpy(rewards).cuda().type(torch.float32)
-        
         if (self.args.pg == 'reinforce'):
             #losses =torch.sum(-logp_actions*rewards,dim=0)
             #loss = torch.mean(losses) - self.args.entcoef * self.entropy_reg.sum(dim=0).mean()
@@ -208,16 +208,32 @@ class SingleTrain(object):
             self.opt.step()
             if self.args.schedule:
                 self.scheduler.step()
+        elif (self.args.pg=='aac'):
+            critic=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
+            states_tensor=torch.stack(self.states)
+            values=critic.forward(states_tensor)
+            values=[torch.Tensor([values[i,0,0,0].item()]*(self.args.batchsize)).cuda() for i in range(self.budgets[self.playerid])]   
+            values_tensor=torch.stack(values)
+            values_loss=F.smooth_l1_loss(values_tensor,rewards)
+            policy_loss=(-logp_actions*(rewards-values_tensor))
+            losses=policy_loss+ values_loss+self.args.entcoef * self.entropy_reg
+            loss=torch.mean(torch.sum(losses,dim=0))
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+            if self.args.schedule:
+                self.scheduler.step()
         elif (self.args.pg == 'ppo'):
             epsilon = 0.2
             p_old = p_actions.detach()
-            r_sign = torch.sign(rewards).type(torch.float32)
             for i in range(self.args.ppo_epoch):
                 if (i != 0):
                     p_actions = [self.trackActionProb(self.states[i], self.pools[i], self.actions[i]) for i in range(len(self.states))]
                     p_actions = torch.stack(p_actions)
                 ratio = p_actions / p_old
-                losses = torch.min(ratio * rewards, (1 + epsilon * r_sign) * rewards)
+                surr1=ratio*rewards
+                surr2=torch.clamp(ratio,1+epsilon,1-epsilon)*rewards
+                losses = torch.min(surr1, surr2)
                 loss = -torch.mean(losses)
                 self.opt.zero_grad()
                 loss.backward()
@@ -227,8 +243,8 @@ class SingleTrain(object):
             # last state is terminal state?
             self.critic_local1=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
             self.critic_local2=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
-            self.critic_optimizer1=torch.optim.Adam(self.critic_local1.parameters(),self.args.rllr)
-            self.critic_optimizer2=torch.optim.Adam(self.critic_local2.parameters(),self.args.rllr)
+            self.critic_optimizer1=torch.optim.Adam(self.critic_local1.parameters(),self.args.lr)
+            self.critic_optimizer2=torch.optim.Adam(self.critic_local2.parameters(),self.args.lr)
             #target network
             self.critic_target1=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
             self.critic_target2=Critic(self.env.statedim,self.actions[0].size(-1)).cuda()
@@ -236,7 +252,7 @@ class SingleTrain(object):
             self.update_weights(self.critic_local1,self.critic_target1)
             self.update_weights(self.critic_local2,self.critic_target2)
             self.actor_local=Actor(self.env.statedim,self.actions[0].size(-1)).cuda()
-            self.actor_optimizer=torch.optim.Adam(self.actor_local.parameters(),self.args.rllr)
+            self.actor_optimizer=torch.optim.Adam(self.actor_local.parameters(),self.args.lr)
             for i in range(self.args.ppo_epoch):
                 next_states=[self.states[j+1] for j in range(len(self.states)-1)]
                 next_states.append(self.states[len(self.states)-1])
